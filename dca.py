@@ -5,39 +5,50 @@ Refactored from the original imoex_dca.py CLI script. The pipeline
 functions here return structured results instead of printing, so both
 the CLI (imoex_dca.py) and the webapp (main.py) can reuse them.
 
-Files (created automatically):
-    data/positions.csv      current holdings
-    data/transactions.csv   full audit log
-    export/composition.csv  latest run report
+Storage lives in SQLite (data/imoex.db, see db.py); the legacy CSVs
+were imported once and are kept untouched. An applied run is one
+atomic DB transaction, and the most recent run can be undone (dca.undo)
+to restore the pre-run positions.
+
+This module has no import-time side effects: entry points call
+db.init() before using it.
 """
 
 from __future__ import annotations
-from datetime import date, datetime, timedelta
-from pathlib import Path
+from datetime import date, datetime
+import logging
 import threading
 import time
 import requests
 import numpy as np
 import pandas as pd
 
+import db
+
+logger = logging.getLogger("imoex.dca")
+
 # ============================================================
 # CONFIG
 # ============================================================
-COMMISSION       = 0.045/100        # 0.045% per trade
-CARRY_THRESHOLD  = 1             # skip buying if fewer than N tickers fit
-INDEX_NAME       = "IMOEX"
-DATA_DIR         = Path("data")
-EXPORT_DIR       = Path("export")
-POSITIONS_FILE   = DATA_DIR / "positions.csv"
-TRANSACTIONS_FILE= DATA_DIR / "transactions.csv"
-REPORT_FILE      = EXPORT_DIR / "composition.csv"
+COMMISSION      = 0.045/100        # 0.045% per trade
+CARRY_THRESHOLD = 1               # skip buying if fewer than N tickers fit
+INDEX_NAME      = "IMOEX"
 
 # Market data (composition + closes) is settled once per trading day,
 # so the dashboard serves it from this in-process cache.
-SNAPSHOT_TTL     = 3600           # seconds
+SNAPSHOT_TTL = 3600               # seconds
 
-DATA_DIR.mkdir(exist_ok=True)
-EXPORT_DIR.mkdir(exist_ok=True)
+# One snapshot is exactly two requests: the index analytics (weights +
+# trade date) and the TQBR board (lot sizes + last legal close).
+ANALYTICS_URL = (
+    "https://iss.moex.com/iss/statistics/engines/stock/markets/index/analytics/"
+    "{indexid}.json?limit={limit}"
+)
+BOARD_URL = (
+    "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/"
+    "securities.json?iss.meta=off&iss.only=securities"
+)
+MAX_PRICE_AGE_DAYS = 30           # reject quotes older than this
 
 # ============================================================
 # MARKET SNAPSHOT — cached composition + prices
@@ -47,10 +58,11 @@ _snapshot      = None  # (trade_date, df, fetched_at)
 
 def get_snapshot(max_age: float = SNAPSHOT_TTL) -> tuple[str, pd.DataFrame]:
     """
-    (trade_date, composition_df_with_prices). Served from the in-process
-    cache while fresh. max_age=0 forces a fresh fetch (used by runs,
-    which must allocate on current prices). The lock is held during the
-    fetch so concurrent callers wait and then reuse the result.
+    (trade_date, composition_df_with_prices_and_lots). Served from the
+    in-process cache while fresh. max_age=0 forces a fresh fetch (used
+    by applied runs, which must allocate on current prices). The lock
+    is held during the fetch so concurrent callers wait and then reuse
+    the result.
     """
     global _snapshot
     with _snapshot_lock:
@@ -58,12 +70,13 @@ def get_snapshot(max_age: float = SNAPSHOT_TTL) -> tuple[str, pd.DataFrame]:
             return _snapshot[0], _snapshot[1]
         df = get_index_composition(INDEX_NAME)
         trade_date = df.loc[0, 'trade_session_date']
-        df['price_rub'] = get_price_by_ticker(df['ticker'], trade_date)
+        board = get_board_securities()
+        _fill_prices_and_lots(df, board, trade_date)
         _snapshot = (trade_date, df, time.time())
         return trade_date, df
 
 def invalidate_snapshot() -> None:
-    """Drop the cache (called on login so the dashboard refreshes)."""
+    """Drop the cache (called on login/refresh so the dashboard refetches)."""
     global _snapshot
     with _snapshot_lock:
         _snapshot = None
@@ -73,148 +86,89 @@ def invalidate_snapshot() -> None:
 # ============================================================
 def get_index_composition(indexid: str = "IMOEX", limit: int = 100) -> pd.DataFrame:
     """
-    Fetches all pages of index analytics for a given index from MOEX ISS
-    and returns a pandas DataFrame.
+    Fetches the index analytics table for a given index from MOEX ISS.
 
-    Parameters
-    ----------
-    indexid : str
-        Index identifier (e.g. 'IMOEX', 'RTS').
-    limit : int
-        Number of rows per page. MOEX ISS caps this at 100.
-
-    Returns
-    -------
-    pd.DataFrame
-        Combined analytics table.
+    A single page is all there is: the index has a fixed, small number
+    of constituents (IMOEX is capped by design), so the limit=100 page
+    always covers it and no pagination is needed.
     """
-    base_url = (
-        f"https://iss.moex.com/iss/statistics/engines/stock/markets/index/analytics/{indexid}.json?limit={limit}"
-    )
-    resp = requests.get(base_url, timeout=30)
+    resp = requests.get(ANALYTICS_URL.format(indexid=indexid, limit=limit), timeout=30)
     resp.raise_for_status()
     payload = resp.json()['analytics']
+    return pd.DataFrame(payload['data'], columns=payload['columns'])
 
-    columns = payload['columns']
-    data = payload['data']
-    return pd.DataFrame(
-        data, columns=columns
-    )
-
-def get_lot_size_by_ticker(tickers: list[str]) -> list[float]:
-    lots = []
-    base_url = (
-        f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json?iss.meta=off&iss.only=securities&securities.columns=SECID,LOTSIZE"
-    )
-    resp = requests.get(base_url, timeout=30)
+def get_board_securities() -> dict[str, dict]:
+    """
+    All TQBR board securities in one request: secid -> row dict with
+    SHORTNAME, LOTSIZE, PREVLEGALCLOSEPRICE, PREVDATE, ...
+    """
+    resp = requests.get(BOARD_URL, timeout=30)
     resp.raise_for_status()
     payload = resp.json()['securities']
-    data = payload['data']
-    ticker_lot = {ticker: float(lot) for (ticker, lot) in data}
-    return [ticker_lot[ticker] for ticker in tickers]
+    columns = payload['columns']
+    secid_i = columns.index('SECID')
+    return {row[secid_i]: dict(zip(columns, row)) for row in payload['data']}
 
-def _price_column(columns: list[str]) -> int:
-    """Index of the price column in a MOEX history payload."""
-    for name in ("LEGALCLOSEPRICE", "CLOSE"):
-        if name in columns:
-            return columns.index(name)
-    return 9  # original hard-coded index
-
-def get_price_by_ticker(tickers: list[str], trade_date: str) -> list[float]:
+def _fill_prices_and_lots(df: pd.DataFrame, board: dict[str, dict],
+                          trade_date: str) -> None:
     """
-    Legal close price per ticker on trade_date. If no data exists for
-    that exact date (e.g. the market is still trading), fall back to
-    the most recent close within the previous 30 days.
+    Fill price_rub (last legal close) and lot_size for every index
+    ticker from the board payload.
+
+    The board's PREVLEGALCLOSEPRICE is the close of the ticker's last
+    settled session (PREVDATE). While the market is still trading that
+    is the previous day's close — the same fallback the old per-ticker
+    history fetch used. A ticker whose last session is more than
+    MAX_PRICE_AGE_DAYS older than trade_date (long suspension) makes the
+    whole snapshot fail with a clear error.
     """
-    prices = []
-    for ticker in tickers:
-        base_url = (
-            f"https://iss.moex.com/iss/history/engines/stock/markets/shares/boards/TQBR/securities/{ticker}.json?from={trade_date}&till={trade_date}"
-        )
-        resp = requests.get(base_url, timeout=30)
-        resp.raise_for_status()
-        payload = resp.json()['history']
-        columns, data = payload['columns'], payload['data']
-
-        if not data:
-            from_dt = (
-                datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=30)
-            ).date().isoformat()
-            base_url = (
-                f"https://iss.moex.com/iss/history/engines/stock/markets/shares/boards/TQBR/securities/{ticker}.json?from={from_dt}&till={trade_date}"
-            )
-            resp = requests.get(base_url, timeout=30)
-            resp.raise_for_status()
-            payload = resp.json()['history']
-            columns, data = payload['columns'], payload['data']
-
-        if not data:
-            raise RuntimeError(f"No price data for {ticker} around {trade_date}")
-
-        idx = _price_column(columns)
-        prices.append(float(data[-1][idx]))
-    return prices
-
-# ============================================================
-# PERSISTENCE — positions & transactions
-# ============================================================
-def load_positions() -> pd.DataFrame:
-    if POSITIONS_FILE.exists():
-        df = pd.read_csv(POSITIONS_FILE)
-        df['shares']    = df['shares'].astype(int)
-        df['avg_price'] = df['avg_price'].astype(float)
-        return df
-    return pd.DataFrame(columns=['ticker', 'shares', 'avg_price'])
-
-def save_positions(pos: pd.DataFrame) -> None:
-    pos.to_csv(POSITIONS_FILE, index=False)
-
-def append_transactions(rows: list[dict]) -> None:
-    if not rows:
-        return
-    df = pd.DataFrame(rows)
-    header = not TRANSACTIONS_FILE.exists()
-    df.to_csv(TRANSACTIONS_FILE, mode='a', header=header, index=False)
+    trade_dt = datetime.strptime(str(trade_date), "%Y-%m-%d")
+    prices, lots = [], []
+    problems = []
+    for ticker in df['ticker']:
+        sec = board.get(ticker)
+        if sec is None:
+            problems.append(f"{ticker}: not found on TQBR board")
+            continue
+        prevdate = sec.get('PREVDATE') or ''
+        price    = sec.get('PREVLEGALCLOSEPRICE')
+        if not prevdate or price in (None, '') or float(price) <= 0:
+            problems.append(f"{ticker}: no price data (last session {prevdate or 'n/a'})")
+            continue
+        age_days = (trade_dt - datetime.strptime(prevdate, "%Y-%m-%d")).days
+        if age_days > MAX_PRICE_AGE_DAYS:
+            problems.append(
+                f"{ticker}: last session {prevdate} is {age_days}d before {trade_date}")
+            continue
+        prices.append(float(price))
+        lots.append(int(float(sec['LOTSIZE'])))
+    if problems:
+        raise RuntimeError("Incomplete market data: " + "; ".join(problems))
+    df['price_rub'] = prices
+    df['lot_size']  = lots
 
 # ============================================================
 # READERS — for the webapp dashboard
 # ============================================================
 def get_positions() -> list[dict]:
-    pos = load_positions().sort_values('ticker')
-    rows = pos.to_dict('records')
-    for row in rows:
-        row['shares']    = int(row['shares'])
-        row['avg_price'] = float(row['avg_price'])
-    return rows
+    return db.get_positions()
 
 def get_transactions() -> list[dict]:
-    if not TRANSACTIONS_FILE.exists():
-        return []
-    df = pd.read_csv(TRANSACTIONS_FILE)
-    rows = df.sort_values('date', ascending=False).to_dict('records')
-    for row in rows:
-        row['shares']     = int(row['shares'])
-        row['price']      = float(row['price'])
-        row['value']      = float(row['value'])
-        row['commission'] = float(row['commission'])
-    return rows
+    return db.get_transactions()
 
 def get_report() -> list[dict]:
-    if not REPORT_FILE.exists():
-        return []
-    df = pd.read_csv(REPORT_FILE)
-    return df.to_dict('records')
+    return db.get_report()
 
 def get_portfolio() -> dict:
     """
     Current portfolio state: index composition enriched with prices and
     the current holdings. No buys are made. Market data comes from the
-    cached snapshot; positions are always read fresh from disk.
+    cached snapshot; positions are always read fresh from the DB.
     """
     trade_date, df = get_snapshot()
     df = df.copy()
 
-    pos = load_positions()
+    pos     = db.load_positions_df()
     pos_idx = pos.set_index('ticker')
     df['current_shares'] = (
         df['ticker'].map(pos_idx['shares']).fillna(0).astype(int)
@@ -303,6 +257,11 @@ def allocate(
 # ============================================================
 # MAIN PIPELINE
 # ============================================================
+# Serializes overlapping runs inside this process. Across processes
+# (webapp + CLI) SQLite's BEGIN IMMEDIATE in db.apply_run is the hard
+# guarantee; this lock just turns the wait into a friendly error.
+_RUN_LOCK = threading.Lock()
+
 def run(new_cash: float, dry_run: bool = False, max_age: float = 0.0) -> dict:
     """
     Run one DCA cycle. Returns a structured result; only persists
@@ -313,17 +272,26 @@ def run(new_cash: float, dry_run: bool = False, max_age: float = 0.0) -> dict:
               current prices. Previews may pass SNAPSHOT_TTL to reuse
               the cached snapshot.
     """
-    # --- 1. Market snapshot (composition + prices) ---
+    if not _RUN_LOCK.acquire(blocking=False):
+        raise RuntimeError("Another run is already in progress")
+    try:
+        return _run_locked(new_cash, dry_run, max_age)
+    finally:
+        _RUN_LOCK.release()
+
+def _run_locked(new_cash: float, dry_run: bool, max_age: float) -> dict:
+    # --- 1. Market snapshot (composition + prices + lot sizes) ---
     trade_date, df = get_snapshot(max_age=max_age)
     df = df.copy()
-    df['lot_size']  = get_lot_size_by_ticker(df['ticker'])
 
     # --- 2. Load current positions ---
-    pos = load_positions()
+    pos     = db.load_positions_df()
+    pos_idx = pos.set_index('ticker')
     df['current_shares'] = (
-        df['ticker'].map(pos.set_index('ticker')['shares']).fillna(0).astype(int)
+        df['ticker'].map(pos_idx['shares']).fillna(0).astype(int)
     )
     df['current_value'] = df['current_shares'] * df['price_rub']
+    df['cost_basis']    = df['current_shares'] * df['ticker'].map(pos_idx['avg_price']).fillna(0)
 
     portfolio_value = float(df['current_value'].sum())
     total_after     = portfolio_value + new_cash
@@ -399,13 +367,12 @@ def run(new_cash: float, dry_run: bool = False, max_age: float = 0.0) -> dict:
         df['target_w']    = w * 100
         df['weight_diff'] = df['post_weight'] - df['target_w']
         l1_error = float(df['weight_diff'].abs().sum() / 2)  # half-sum convention
-        # update df for export
-        df['post_value'] = post_value
     else:
         df['post_weight'] = 0.0
         df['target_w']    = w * 100
         df['weight_diff'] = 0.0
-        df['post_value']  = df['current_value']
+    # post_value is kept in the df for the report in both branches
+    df['post_value'] = (df['current_shares'] + df['buy_shares']) * df['price_rub']
 
     # --- 9. Persist ---
     if dry_run:
@@ -425,47 +392,34 @@ def run(new_cash: float, dry_run: bool = False, max_age: float = 0.0) -> dict:
             'dry_run':         True,
         }
 
-    # update positions
-    for _, r in buys.iterrows():
-        t = r['ticker']
-        mask = pos['ticker'] == t
-        if mask.any():
-            old_sh  = int(pos.loc[mask, 'shares'].iloc[0])
-            old_avg = float(pos.loc[mask, 'avg_price'].iloc[0])
-            new_sh  = old_sh + int(r['buy_shares'])
-            new_cost = old_sh * old_avg + float(r['buy_value']) + float(r['buy_comm'])
-            pos.loc[mask, 'shares']    = new_sh
-            pos.loc[mask, 'avg_price'] = new_cost / new_sh
-        else:
-            pos = pd.concat([pos, pd.DataFrame([{
-                'ticker':    t,
-                'shares':    int(r['buy_shares']),
-                'avg_price': (float(r['buy_value']) + float(r['buy_comm'])) / int(r['buy_shares']),
-            }])], ignore_index=True)
+    # Plain Python types: sqlite3 does not bind numpy scalars.
+    report_df = df[['ticker', 'shortnames', 'weight', 'price_rub', 'lot_size',
+                    'current_shares', 'current_value', 'cost_basis',
+                    'buy_shares', 'buy_value', 'buy_comm',
+                    'post_value', 'post_weight', 'target_w', 'weight_diff']]
+    report_rows = [
+        {'ticker': r['ticker'], 'name': r['shortnames'], 'weight': float(r['weight']),
+         'price': float(r['price_rub']), 'lot_size': int(r['lot_size']),
+         'current_shares': int(r['current_shares']),
+         'current_value': float(r['current_value']), 'cost_basis': float(r['cost_basis']),
+         'buy_shares': int(r['buy_shares']), 'buy_value': float(r['buy_value']),
+         'buy_comm': float(r['buy_comm']), 'post_value': float(r['post_value']),
+         'post_weight': float(r['post_weight']), 'target_w': float(r['target_w']),
+         'weight_diff': float(r['weight_diff'])}
+        for r in report_df.to_dict('records')]
 
-    save_positions(pos)
-
-    # transaction log
-    today = date.today().isoformat()
-    append_transactions([
-        {
-            'date':       today,
-            'ticker':     r['ticker'],
-            'action':     'BUY',
-            'shares':     int(r['buy_shares']),
-            'price':      float(r['price_rub']),
-            'value':      float(r['buy_value']),
-            'commission': float(r['buy_comm']),
-        }
-        for _, r in buys.iterrows()
-    ])
-
-    # report
-    report_cols = ['ticker', 'shortnames', 'weight', 'price_rub', 'lot_size',
-                   'current_shares', 'current_value',
-                   'buy_shares', 'buy_value', 'buy_comm',
-                   'post_value', 'post_weight', 'target_w', 'weight_diff']
-    df[report_cols].to_csv(REPORT_FILE, index=False)
+    run_id = db.apply_run(
+        run_date=date.today().isoformat(),
+        amount=new_cash,
+        trade_date=trade_date,
+        buys=buy_rows,
+        report_rows=report_rows,
+    )
+    logger.info(
+        "Run %d applied: %s RUB, %d buys, %.2f RUB leftover",
+        run_id, f"{new_cash:,.2f}", len(buy_rows), leftover_final)
+    if carried:
+        logger.warning("Run %d carried cash: %s", run_id, carry_reason)
 
     return {
         'trade_date':      trade_date,
@@ -481,4 +435,33 @@ def run(new_cash: float, dry_run: bool = False, max_age: float = 0.0) -> dict:
         'carry_reason':    carry_reason,
         'rows':            len(df),
         'dry_run':         False,
+        'run_id':          run_id,
     }
+
+# ============================================================
+# UNDO — one step back, git-style
+# ============================================================
+def latest_undoable_run() -> dict | None:
+    """The most recent applied run the UI can offer to undo (or None)."""
+    return db.latest_undoable_run()
+
+def undo() -> dict:
+    """
+    Reverse the most recent applied run: restore the pre-run positions,
+    mark the run undone, and append UNDO rows to the audit log. Only
+    the latest applied run can be undone at a time; after an undo the
+    previous run becomes the target.
+    """
+    if not _RUN_LOCK.acquire(blocking=False):
+        raise RuntimeError("Another run is already in progress")
+    try:
+        target = db.latest_undoable_run()
+        if target is None:
+            raise RuntimeError("Nothing to undo — no applied runs")
+        res = db.undo_run(target['id'], date.today().isoformat())
+        logger.info(
+            "Run %d undone (%s, %s RUB), %d buys reversed",
+            res['id'], res['date'], f"{res['amount'] or 0:,.2f}", res['n_reversed'])
+        return res
+    finally:
+        _RUN_LOCK.release()

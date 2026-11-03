@@ -4,15 +4,18 @@ imoex_dca.py — CLI wrapper around dca.run() (bi-weekly DCA into IMOEX).
 Usage:
     python imoex_dca.py                  # interactive: prompts for amount
     python imoex_dca.py --dry-run [N]    # preview without writing files
+    python imoex_dca.py --undo           # reverse the last applied run
 
 All logic lives in dca.py; this module only handles I/O for the terminal.
 """
 
 from __future__ import annotations
+import logging
 import sys
 from datetime import datetime
 import pandas as pd
 import dca
+import db
 
 def _fmt_table(rows: list[dict]) -> str:
     if not rows:
@@ -24,9 +27,27 @@ def _fmt_table(rows: list[dict]) -> str:
     })
     return df.to_string(index=False)
 
+def _undo() -> None:
+    try:
+        res = dca.undo()
+    except RuntimeError as e:
+        print(f"✗ {e}")
+        sys.exit(1)
+    print(f"✓ Run of {res['date']} ({res['amount']:,.2f} RUB) undone —")
+    print(f"  positions restored to their pre-run state "
+          f"({res['n_reversed']} buys reversed).")
+
 def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] == "--dry-run":
-        amount = float(sys.argv[2]) if len(sys.argv) > 2 else 10_000
+    logging.basicConfig(level=logging.INFO,
+                        format="%(levelname)s %(name)s: %(message)s")
+    db.init()
+
+    args = sys.argv[1:]
+    if args and args[0] == "--undo":
+        _undo()
+        return
+    if args and args[0] == "--dry-run":
+        amount = float(args[1]) if len(args) > 1 else 10_000
         dry_run = True
     else:
         amount = float(input("Amount to invest this period (RUB): "))
@@ -66,9 +87,8 @@ def main() -> None:
         print("\n[dry-run] no files written.")
         return
 
-    print(f"\n✓ Positions saved    → {dca.POSITIONS_FILE}")
-    print(f"✓ Transactions log   → {dca.TRANSACTIONS_FILE}")
-    print(f"✓ Report             → {dca.REPORT_FILE}")
+    print(f"\n✓ Run #{res['run_id']} applied    (undo anytime: python imoex_dca.py --undo)")
+    print(f"✓ Data stored        → {db.DB_PATH}")
     print(f"✓ Rows processed     : {res['rows']}\n")
 
 if __name__ == "__main__":

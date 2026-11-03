@@ -11,6 +11,7 @@
     <h1>IMOEX DCA</h1>
     <div class="header-right">
       <span class="muted" id="trade-date"></span>
+      <button id="refresh-btn" class="btn btn-ghost" title="Refetch market data from MOEX">↻ Refresh</button>
       <button id="logout-btn" class="btn btn-ghost">Log out</button>
     </div>
   </header>
@@ -35,6 +36,10 @@
         <button type="submit" id="preview-btn" class="btn">Preview (dry run)</button>
         <button type="button" id="confirm-btn" class="btn btn-primary" hidden>Confirm &amp; apply</button>
       </form>
+      <p class="undo-line" id="undo-wrap" hidden>
+        <button type="button" id="undo-btn" class="btn btn-danger">↩ Undo last run</button>
+        <span class="muted" id="undo-info"></span>
+      </p>
       <div id="run-spinner" class="spinner-wrap" hidden><div class="spinner"></div><span class="muted" id="spinner-label">Loading…</span></div>
       <p class="error" id="run-error" hidden></p>
 

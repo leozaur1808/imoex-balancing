@@ -140,6 +140,23 @@ input:focus { outline: none; border-color: var(--accent); }
 }
 .btn-ghost:hover { color: var(--text); }
 
+.btn-danger {
+  background: transparent;
+  border: 1px solid var(--neg);
+  color: var(--neg);
+  padding: 6px 12px;
+  font-size: 13px;
+}
+.btn-danger:hover:not(:disabled) { background: rgba(224, 93, 93, 0.12); }
+
+.undo-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 0;
+}
+.undo-line[hidden] { display: none; }
+
 /* ---------- spinner ---------- */
 
 .spinner-wrap {

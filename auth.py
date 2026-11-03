@@ -19,7 +19,9 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-AUTH_FILE = Path("data") / "auth.json"
+# Anchored to this file's directory, not the CWD, so running the app
+# from another directory can't silently target a second data dir.
+AUTH_FILE = Path(__file__).parent / "data" / "auth.json"
 
 PBKDF2_ITERATIONS = 600_000
 SALT_BYTES        = 16

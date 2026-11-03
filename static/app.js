@@ -5,6 +5,10 @@ const $ = (id) => document.getElementById(id);
 const fmtNum = (v, digits = 2) =>
   Number(v).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 
+/* escape dynamic values before injecting into innerHTML */
+const esc = (v) => String(v).replace(/[&<>"']/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
 async function api(path, opts = {}) {
   const r = await fetch(path, opts);
   if (r.status === 401) {
@@ -104,7 +108,7 @@ function renderTab(rows) {
     '<tr>' + cols.map(([key]) => {
       const v = row[key];
       const cell = v === null || v === undefined ? '' : (fmt[key] ? fmt[key](v) : v);
-      return `<td>${cell}</td>`;
+      return `<td>${esc(cell)}</td>`;
     }).join('') + '</tr>'
   ).join('');
   $('tab-empty').hidden = rows.length > 0;
@@ -122,6 +126,7 @@ function setBusy(busy, label) {
   if (label) $('spinner-label').textContent = label;
   $('preview-btn').disabled = busy;
   $('confirm-btn').disabled = busy;
+  $('undo-btn').disabled = busy;
 }
 
 function showRunError(msg) {
@@ -140,6 +145,7 @@ function renderResult(res, dryRun) {
   $('result-title').textContent = title;
 
   const items = [
+    ['Prices as of', esc(res.trade_date)],
     ['Stock bought', fmtNum(res.stock_bought) + ' ₽'],
     ['Commission', fmtNum(res.commission_paid, 4) + ' ₽'],
     ['Total spent', fmtNum(res.total_spent) + ' ₽'],
@@ -155,12 +161,12 @@ function renderResult(res, dryRun) {
   const tbody = $('buy-table').querySelector('tbody');
   tbody.innerHTML = res.buys.length
     ? res.buys.map((b) =>
-        `<tr><td>${b.ticker}</td><td>${b.name}</td><td>${b.weight.toFixed(2)}</td>` +
+        `<tr><td>${esc(b.ticker)}</td><td>${esc(b.name)}</td><td>${b.weight.toFixed(2)}</td>` +
         `<td>${b.shares}</td><td>${fmtNum(b.price)}</td><td>${fmtNum(b.value)}</td>` +
         `<td>${fmtNum(b.commission, 4)}</td></tr>`
       ).join('')
     : '<tr><td colspan="7" class="muted">No buy orders — ' +
-      (res.carry_reason || 'nothing to buy') + '</td></tr>';
+      esc(res.carry_reason || 'nothing to buy') + '</td></tr>';
 }
 
 async function doRun(dryRun) {
@@ -183,7 +189,60 @@ async function doRun(dryRun) {
     if (!dryRun) {
       await loadPortfolio();
       await loadTab();
+      await loadUndoTarget();
     }
+  } catch (e) {
+    showRunError(e.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+/* ---------- undo ---------- */
+
+async function loadUndoTarget() {
+  const data = await api('/api/undo-target');
+  const run = data.run;
+  $('undo-wrap').hidden = !run;
+  if (run) {
+    $('undo-info').textContent =
+      `run of ${run.date} · ${fmtNum(run.amount)} RUB — undo restores the positions to their state before that run`;
+  }
+}
+
+async function doUndo() {
+  if (!confirm('Undo the last applied run? Positions will be restored to their state before it.')) return;
+  setBusy(true, 'Undoing last run…');
+  hideRunError();
+  try {
+    const res = await api('/api/undo', { method: 'POST' });
+    $('run-result').hidden = false;
+    $('result-title').textContent = 'Last run undone';
+    $('result-summary').innerHTML =
+      `<span class="chip"><b>Run</b> ${esc(res.date)} · ${fmtNum(res.amount)} ₽</span>` +
+      `<span class="chip"><b>Reversed</b> ${res.n_reversed} buys</span>`;
+    $('buy-table').querySelector('tbody').innerHTML =
+      '<tr><td colspan="7" class="muted">Positions restored to their pre-run state.</td></tr>';
+    $('confirm-btn').hidden = true;
+    await loadPortfolio();
+    await loadTab();
+    await loadUndoTarget();
+  } catch (e) {
+    showRunError(e.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+/* ---------- refresh market data ---------- */
+
+async function doRefresh() {
+  setBusy(true, 'Refreshing market data…');
+  hideRunError();
+  try {
+    await api('/api/refresh', { method: 'POST' });
+    await loadPortfolio();
+    await loadTab();
   } catch (e) {
     showRunError(e.message);
   } finally {
@@ -199,6 +258,8 @@ document.addEventListener('DOMContentLoaded', () => {
     doRun(true);
   });
   $('confirm-btn').addEventListener('click', () => doRun(false));
+  $('undo-btn').addEventListener('click', doUndo);
+  $('refresh-btn').addEventListener('click', doRefresh);
 
   document.querySelectorAll('.tab').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -221,4 +282,5 @@ document.addEventListener('DOMContentLoaded', () => {
   loadPortfolio()
     .catch((e) => showRunError(e.message))
     .finally(() => setBusy(false));
+  loadUndoTarget().catch(() => { $('undo-wrap').hidden = true; });
 });

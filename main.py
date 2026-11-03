@@ -9,10 +9,11 @@ personal financial data.
 """
 
 from __future__ import annotations
+import logging
 import secrets
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -20,7 +21,14 @@ from starlette.middleware.sessions import SessionMiddleware
 
 import auth
 import dca
+import db
 from pathlib import Path
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+)
+logger = logging.getLogger("imoex.web")
 
 BASE_DIR = Path(__file__).parent
 
@@ -31,7 +39,10 @@ app = FastAPI(title="IMOEX DCA", docs_url=None, redoc_url=None)
 app.add_middleware(
     SessionMiddleware,
     secret_key=auth.get_secret() or secrets.token_hex(32),
+    max_age=7 * 24 * 3600,  # sessions expire after a week
 )
+
+db.init()  # create the SQLite schema + one-time legacy CSV import
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -109,6 +120,12 @@ def api_transactions(_: None = Depends(auth.require_auth)):
 def api_report(_: None = Depends(auth.require_auth)):
     return {"rows": dca.get_report()}
 
+@app.post("/api/refresh")
+def api_refresh(_: None = Depends(auth.require_auth)):
+    """Drop the market-data cache; the next dashboard load refetches."""
+    dca.invalidate_snapshot()
+    return {"ok": True}
+
 class RunIn(BaseModel):
     amount: float = Field(gt=0)
     dry_run: bool = False
@@ -117,7 +134,7 @@ class RunIn(BaseModel):
 def api_run(payload: RunIn, _: None = Depends(auth.require_auth)):
     """
     Synchronous endpoint on purpose: FastAPI runs it in the threadpool,
-    so the many sequential MOEX calls don't block the event loop.
+    so the MOEX fetches don't block the event loop.
 
     Previews reuse the cached market snapshot (instant); an applied
     run always computes on a fresh fetch.
@@ -125,25 +142,44 @@ def api_run(payload: RunIn, _: None = Depends(auth.require_auth)):
     try:
         max_age = dca.SNAPSHOT_TTL if payload.dry_run else 0.0
         return dca.run(payload.amount, dry_run=payload.dry_run, max_age=max_age)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
+        logger.exception("Run failed")
         raise HTTPException(status_code=502, detail=f"Run failed: {e}")
 
+@app.get("/api/undo-target")
+def api_undo_target(_: None = Depends(auth.require_auth)):
+    """The latest applied run the UI can offer to undo (or null)."""
+    return {"run": dca.latest_undoable_run()}
+
+@app.post("/api/undo")
+def api_undo(_: None = Depends(auth.require_auth)):
+    try:
+        return dca.undo()
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.exception("Undo failed")
+        raise HTTPException(status_code=500, detail=f"Undo failed: {e}")
+
 # ============================================================
-# CSV downloads
+# CSV downloads — synthesized from the DB on demand
 # ============================================================
 _DOWNLOADS = {
-    "positions":    dca.POSITIONS_FILE,
-    "transactions": dca.TRANSACTIONS_FILE,
-    "composition":  dca.REPORT_FILE,
+    "positions":    (db.positions_csv, "positions.csv"),
+    "transactions": (db.transactions_csv, "transactions.csv"),
+    "composition":  (db.composition_csv, "composition.csv"),
 }
 
 @app.get("/download/{name}")
 def download(name: str, _: None = Depends(auth.require_auth)):
-    path = _DOWNLOADS.get(name)
-    if path is None or not path.exists():
+    entry = _DOWNLOADS.get(name)
+    if entry is None:
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(
-        path,
+    make_csv, filename = entry
+    return Response(
+        make_csv(),
         media_type="text/csv",
-        filename=path.name,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

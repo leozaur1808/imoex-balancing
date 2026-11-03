@@ -13,14 +13,17 @@ Two front-ends share the same core logic (`dca.py`):
 ## Project layout
 
 ```
-dca.py              core logic: MOEX fetches, allocator, pipeline, persistence
+dca.py              core logic: MOEX fetches, allocator, pipeline
+db.py               SQLite storage: positions, runs, transactions, reports
 imoex_dca.py        CLI wrapper (terminal usage unchanged)
 main.py             FastAPI app + routes
 auth.py             single-user password auth (PBKDF2, session cookies)
 templates/          Jinja2 pages (dashboard, login/setup)
 static/             vanilla JS + CSS for the dashboard
-data/               positions.csv, transactions.csv, auth.json   (gitignored)
-export/             composition.csv — latest run report          (gitignored)
+tests/              pytest suite (allocator, pipeline, undo, migration)
+data/               imoex.db, auth.json                              (gitignored)
+                    positions.csv, transactions.csv — legacy, imported once
+export/             composition.csv — legacy, imported once
 ```
 
 ## Setup
@@ -28,6 +31,9 @@ export/             composition.csv — latest run report          (gitignored)
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+# for running the tests:
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest
 ```
 
 ## Webapp
@@ -48,9 +54,9 @@ behind a single-user password:
 2. The password is stored **hashed** (PBKDF2-SHA256, 600k iterations, random
    salt) in `data/auth.json` with file mode `0600`. The file is inside the
    gitignored `data/` directory, so nothing personal ever reaches git.
-3. Login sets a signed session cookie (`HttpOnly`, `SameSite=Lax`). The
-   session secret is persisted in the same file, so a server restart does not
-   force a re-login.
+3. Login sets a signed session cookie (`HttpOnly`, `SameSite=Lax`, expires
+   after a week). The session secret is persisted in the same file, so a
+   server restart does not force a re-login.
 4. After 5 failed logins the app locks out for 30 seconds.
 
 To reset the password, delete `data/auth.json` and restart — the setup screen
@@ -63,26 +69,50 @@ comes back.
 ### Using the dashboard
 
 - **Summary cards** — portfolio value, cost basis, P/L, held/index ticker
-  counts. Prices are the legal close of the latest trading session (if the
-  market is still trading, the app falls back to the most recent close within
-  30 days).
+  counts. Prices are the last legal close (if the market is still trading,
+  that is the previous session's close).
+- **↻ Refresh** (header) — drops the market-data cache and refetches from
+  MOEX (2 requests, ~1 s).
 - **Run DCA** — enter the contribution amount:
-  1. *Preview (dry run)* computes the buy orders **without writing any files**.
-  2. *Confirm & apply* runs the same computation for real: updates
-     `data/positions.csv`, appends to `data/transactions.csv`, and rewrites
-     `export/composition.csv`.
+  1. *Preview (dry run)* computes the buy orders **without writing anything**.
+  2. *Confirm & apply* computes on a fresh fetch and commits the run.
+- **↩ Undo last run** — appears while there is an applied run. Reverses the
+  most recent run (one step back, like popping a commit): restores the
+  pre-run positions and marks the run undone. `UNDO` rows are appended to the
+  audit log. Only the latest applied run can be undone at a time.
 - **Tabs** — Holdings (current positions vs index weights), Transactions
-  (full audit log), Last report (per-ticker composition after the last run).
-- **CSV downloads** — the three data files, right from the tab bar.
+  (full audit log, BUY and UNDO rows), Last report (per-ticker composition
+  after the last run).
+- **CSV downloads** — the three data files, synthesized from the database.
 
-The run makes ~50 sequential requests to MOEX ISS, so expect a 10–60 s wait
-while the spinner is up.
+## Storage
+
+All portfolio state lives in **SQLite** (`data/imoex.db`, gitignored):
+
+```
+positions(ticker PK, shares, avg_price)
+runs(id PK, date, amount, trade_date, status: applied | undone | legacy)
+transactions(id PK, run_id, date, ticker, action: BUY | UNDO, shares, price, value, commission)
+run_report(run_id, ticker, …per-ticker composition + cost basis…)
+```
+
+- An applied run is one atomic `BEGIN IMMEDIATE` transaction (positions +
+  audit rows + report), so an overlapping webapp + CLI run can never both
+  apply — the second one gets a clear error.
+- Undo math is exact: `avg_price` is recomputed from
+  `shares · avg_price − buy_value − commission`, which restores the
+  pre-run value bit-for-bit.
+- On first start, the legacy CSVs (`data/positions.csv`,
+  `data/transactions.csv`, `export/composition.csv`) are imported once —
+  positions as-is, the old audit log and last report as a non-undoable
+  `legacy` run. The files are left untouched; the DB is the source of truth.
 
 ## CLI
 
 ```bash
 .venv/bin/python imoex_dca.py                  # interactive: prompts for amount
 .venv/bin/python imoex_dca.py --dry-run [N]    # preview, defaults to 10,000 RUB
+.venv/bin/python imoex_dca.py --undo           # reverse the last applied run
 ```
 
 ## Docker
@@ -94,22 +124,31 @@ docker compose up --build
 Then open <http://127.0.0.1:8080> (change the port mapping in
 `docker-compose.yml` if you want a different one).
 
-- `Dockerfile` — Python image with the app; uvicorn binds to `0.0.0.0`
-  *inside* the container, but the app port is not published.
+- `Dockerfile` — Python image with the app, running as a non-root user (uid
+  1000) so bind-mounted files are not root-owned on the host. On a Linux
+  host, `chown` `data/` and `export/` to uid 1000 first (on Docker Desktop
+  for macOS it just works). Uvicorn binds to `0.0.0.0` *inside* the
+  container, but the app port is not published.
 - `nginx.conf` — reverse proxy, the only external entry point, with a
-  120s proxy timeout (a cold-cache MOEX fetch can take ~60s).
-- `data/` and `export/` are bind-mounted from the host, so positions,
-  transactions, and the password hash survive image rebuilds and are never
-  baked into the image (see `.dockerignore`).
+  120s proxy timeout.
+- `data/` and `export/` are bind-mounted from the host, so the database,
+  password hash, and legacy CSVs survive image rebuilds and are never baked
+  into the image (see `.dockerignore`).
 
 ## Caching
 
 Market data (index composition + closes) is settled once per trading day,
 so it is cached in-process for an hour (`SNAPSHOT_TTL` in `dca.py`):
 
-- the cache is invalidated on every login, so each login refreshes data once;
-- dashboard loads and dry-run previews are served from the cache (instant);
-- an *applied* run always fetches fresh data before allocating.
+- the cache is invalidated on every login, on every *applied* run (which
+  fetches fresh data), and via the **↻ Refresh** button;
+- dashboard loads and dry-run previews are served from the cache.
+
+A snapshot is exactly two MOEX requests: the index analytics (weights +
+trade date) and the TQBR board (lot sizes + last legal close per ticker),
+so a cold fetch takes ~1 s instead of the old ~50 sequential price requests.
+Tickers whose last settled session is more than 30 days old (long
+suspensions) make the snapshot fail with a clear error.
 
 ## How the allocator works
 
@@ -123,8 +162,21 @@ holdings and index-proportional targets, the allocator:
 
 If fewer than `CARRY_THRESHOLD` tickers fit in the budget, the whole
 contribution is carried over to the next period instead of buying.
+Leftover cash is reported per run but not persisted — add it to the next
+contribution manually if you want.
 
 ## Configuration
 
 Constants at the top of `dca.py`: commission (`0.045%`), carry threshold,
-index name, and file paths.
+index name, snapshot TTL. Storage lives in `db.py`.
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest
+```
+
+Covers the allocator (floor start, greedy phase, phase-2 remainder, budget
+with commission), the run/undo pipeline end-to-end with a mocked market and
+temp database (apply → undo round-trip restores the exact pre-run state),
+dry-run purity, the legacy CSV migration, and snapshot error handling.
