@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IMOEX DCA</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>IMOEX DCA</h1>
+    <div class="header-right">
+      <span class="muted" id="trade-date"></span>
+      <button id="logout-btn" class="btn btn-ghost">Log out</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Summary cards -->
+    <section class="cards" id="cards">
+      <div class="card"><div class="card-label">Portfolio value</div><div class="card-value" id="c-value">…</div></div>
+      <div class="card"><div class="card-label">Cost basis</div><div class="card-value" id="c-cost">…</div></div>
+      <div class="card"><div class="card-label">P/L</div><div class="card-value" id="c-pl">…</div></div>
+      <div class="card"><div class="card-label">Held / index</div><div class="card-value" id="c-held">…</div></div>
+    </section>
+
+    <!-- Run panel -->
+    <section class="panel">
+      <h2>Run DCA</h2>
+      <form id="run-form" class="run-form">
+        <label>
+          Amount to invest (RUB)
+          <input type="number" id="amount" min="1" step="any" value="10000" required>
+        </label>
+        <button type="submit" id="preview-btn" class="btn">Preview (dry run)</button>
+        <button type="button" id="confirm-btn" class="btn btn-primary" hidden>Confirm &amp; apply</button>
+      </form>
+      <div id="run-spinner" class="spinner-wrap" hidden><div class="spinner"></div><span class="muted" id="spinner-label">Loading…</span></div>
+      <p class="error" id="run-error" hidden></p>
+
+      <div id="run-result" hidden>
+        <div class="result-head">
+          <h3 id="result-title"></h3>
+          <div class="result-summary" id="result-summary"></div>
+        </div>
+        <div class="table-wrap">
+          <table id="buy-table">
+            <thead>
+              <tr><th>Ticker</th><th>Name</th><th>Idx&nbsp;w%</th><th>Shares</th><th>Price</th><th>Value, RUB</th><th>Comm, RUB</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Data tabs -->
+    <section class="panel">
+      <div class="tabs">
+        <button class="tab active" data-tab="holdings">Holdings</button>
+        <button class="tab" data-tab="transactions">Transactions</button>
+        <button class="tab" data-tab="report">Last report</button>
+        <span class="tabs-right">
+          <a class="dl" href="/download/positions">positions.csv</a>
+          <a class="dl" href="/download/transactions">transactions.csv</a>
+          <a class="dl" href="/download/composition">composition.csv</a>
+        </span>
+      </div>
+      <div class="table-wrap">
+        <table id="tab-table">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="muted" id="tab-empty" hidden>No data yet.</p>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

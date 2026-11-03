@@ -1,0 +1,21 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    # Personal data lives in the host's data/ and export/ dirs
+    # (positions, transactions, password hash).
+    volumes:
+      - ./data:/app/data
+      - ./export:/app/export
+    # No ports published — nginx is the only entry point.
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    # Change "8080" to whatever host port you want (e.g. "80:80").
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
