@@ -149,6 +149,8 @@ input:focus { outline: none; border-color: var(--accent); }
   margin-top: 14px;
 }
 
+.spinner-wrap[hidden] { display: none; }
+
 .spinner {
   width: 18px;
   height: 18px;
