@@ -1,73 +1,79 @@
 # index-investment
 
-Bi-weekly DCA (dollar-cost averaging) into the **IMOEX** index with position
-tracking. Fetches the index composition from MOEX ISS, computes index-proportional
-targets for your portfolio, and produces commission-aware buy orders that
-minimize tracking error (L1 weight error). DCA mode never sells.
+Multi-user DCA (dollar-cost averaging) into a **MOEX stock index of your
+choice** with per-user commissions and position tracking. Fetches the index
+composition from MOEX ISS, computes index-proportional targets for your
+portfolio, and produces commission-aware buy orders that minimize tracking
+error (L1 weight error). DCA mode never sells.
 
-Two front-ends share the same core logic (`dca.py`):
-
-- **Webapp** — FastAPI dashboard with password auth (see below)
-- **CLI** — the original terminal script, kept as a thin wrapper
+ASP.NET Core rewrite of the original Python/FastAPI app (see `main` branch).
+Every user has their own portfolio, commission rate and index — the
+allocator and run/undo pipeline are the same as the original, ported 1:1.
 
 ## Project layout
 
 ```
-dca.py              core logic: MOEX fetches, allocator, pipeline
-db.py               SQLite storage: positions, runs, transactions, reports
-imoex_dca.py        CLI wrapper (terminal usage unchanged)
-main.py             FastAPI app + routes
-auth.py             single-user password auth (PBKDF2, session cookies)
-templates/          Jinja2 pages (dashboard, login/setup)
-static/             vanilla JS + CSS for the dashboard
-tests/              pytest suite (allocator, pipeline, undo, migration)
-data/               imoex.db, auth.json                              (gitignored)
-                    positions.csv, transactions.csv — legacy, imported once
-export/             composition.csv — legacy, imported once
+src/
+  IndexInvestment.Core/   core logic: MOEX client, allocator, run/undo
+                          pipeline, EF Core data layer, CSV import
+  IndexInvestment.Web/    ASP.NET Core webapp (Identity auth, API, dashboard)
+  IndexInvestment.Cli/    small console wrapper (same engine + database)
+tests/IndexInvestment.Tests/  xunit suite (allocator, pipeline, undo,
+                          imports, per-user isolation)
+data/                     app.db (SQLite)                          (gitignored)
 ```
 
 ## Setup
 
+Requires the .NET 10 SDK.
+
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-# for running the tests:
-.venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest
+dotnet build
+dotnet test
 ```
 
 ## Webapp
 
+From the **repo root** (so the webapp and the CLI share `data/app.db`):
+
 ```bash
-.venv/bin/uvicorn main:app --port 8000
+cd <repo-root>
+dotnet build
+ASPNETCORE_URLS=http://127.0.0.1:8000 dotnet src/IndexInvestment.Web/bin/Debug/net10.0/IndexInvestment.Web.dll
 ```
 
 Then open <http://127.0.0.1:8000>.
 
-### First run — setting the password
+> The default database path is `data/app.db`, resolved against the
+> *working directory*. Run both the webapp and the CLI from the repo
+> root to share one database; point them elsewhere with
+> `ConnectionStrings__Default` (webapp) / `--db` (CLI).
+
+### First run — creating the admin account
 
 The app contains personal financial data, so every page and API endpoint is
-behind a single-user password:
+behind authentication:
 
-1. On the first launch (no `data/auth.json` yet) you get a **create password**
-   screen instead of a login form.
-2. The password is stored **hashed** (PBKDF2-SHA256, 600k iterations, random
-   salt) in `data/auth.json` with file mode `0600`. The file is inside the
-   gitignored `data/` directory, so nothing personal ever reaches git.
-3. Login sets a signed session cookie (`HttpOnly`, `SameSite=Lax`, expires
-   after a week). The session secret is persisted in the same file, so a
-   server restart does not force a re-login.
-4. After 5 failed logins the app locks out for 30 seconds.
+1. On the first launch (no users yet) you get a **setup screen** instead of
+   a login form: create the **admin** account (email + password).
+2. The password is stored **hashed** (ASP.NET Core Identity, PBKDF2) in the
+   `AspNetUsers` table of `data/app.db`, inside the gitignored `data/`
+   directory — nothing personal ever reaches git.
+3. Login sets a cookie session (`HttpOnly`, `SameSite=Lax`, 7-day sliding
+   expiry). After 5 failed logins the account is locked out for 30 seconds.
+4. Further accounts are created **only by the admin** (`Admin` link in the
+   header → *Create account*). The admin can reset passwords and lock/
+   unlock accounts.
 
-To reset the password, delete `data/auth.json` and restart — the setup screen
-comes back.
-
-> **Security note:** uvicorn binds to `127.0.0.1` by default. Keep it that
-> way — the password is a second layer, not the only one. Do not expose this
-> app on your LAN without putting it behind a proper reverse proxy with TLS.
+> **Security note:** the dev server binds to `127.0.0.1`. Keep it that way —
+> the password is a second layer, not the only one. Do not expose this app
+> on your LAN without putting it behind a proper reverse proxy with TLS.
 
 ### Using the dashboard
 
+- **⚙ Settings** — your own **commission %** and **MOEX index** (free text,
+  suggestions: IMOEX, MOEXBMI, MOEXC, MOEXRUS, MOEXDYN, MOEXGAP, MOEXAIR).
+  Any stock-based MOEX index id works. Applies to your runs only.
 - **Summary cards** — portfolio value, cost basis, P/L, held/index ticker
   counts. Prices are the last legal close (if the market is still trading,
   that is the previous session's close).
@@ -78,42 +84,63 @@ comes back.
   2. *Confirm & apply* computes on a fresh fetch and commits the run.
 - **↩ Undo last run** — appears while there is an applied run. Reverses the
   most recent run (one step back, like popping a commit): restores the
-  pre-run positions and marks the run undone. `UNDO` rows are appended to the
-  audit log. Only the latest applied run can be undone at a time.
-- **Tabs** — Holdings (current positions vs index weights), Transactions
-  (full audit log, BUY and UNDO rows), Last report (per-ticker composition
-  after the last run).
-- **CSV downloads** — the three data files, synthesized from the database.
+  pre-run positions and marks the run undone. `UNDO` rows are appended to
+  the audit log. Only the latest applied run can be undone at a time.
+- **Holdings tab** — current positions vs index weights, plus a *Your
+  positions* section: add / edit / delete positions directly.
+- **Transactions tab** — full audit log (BUY and UNDO rows). Each BUY row
+  has a **✎ price** button: runs are priced at last legal closes (t-1), so
+  this is where you correct the *actual* fill price / commission — the
+  position's average price is recomputed exactly.
+- **Import tab** — import your current positions and/or a transaction
+  history (CSV, same formats as the old app's `positions.csv` /
+  `transactions.csv`, accepted verbatim). Positions import replaces the
+  listed tickers; a history import is replayed (BUY adds, UNDO reverses)
+  and stored as a non-undoable *imported* run.
+- **Tabs / CSV downloads** — Holdings, Transactions, Last report
+  (per-ticker composition after the last run), plus the three data files.
 
 ## Storage
 
-All portfolio state lives in **SQLite** (`data/imoex.db`, gitignored):
+All portfolio state lives in **SQLite** (`data/app.db`, gitignored):
 
 ```
-positions(ticker PK, shares, avg_price)
-runs(id PK, date, amount, trade_date, status: applied | undone | legacy)
-transactions(id PK, run_id, date, ticker, action: BUY | UNDO, shares, price, value, commission)
+AspNetUsers / AspNetRoles        Identity (accounts, hashed passwords)
+UserSettings(user_id PK, commission_percent, index_id)
+positions(user_id, ticker PK, shares, avg_price)
+runs(id PK, user_id, date, amount, trade_date, index_id,
+      status: applied | undone | imported)
+transactions(id PK, run_id, user_id, date, ticker,
+      action: BUY | UNDO, shares, price, value, commission)
 run_report(run_id, ticker, …per-ticker composition + cost basis…)
 ```
 
-- An applied run is one atomic `BEGIN IMMEDIATE` transaction (positions +
-  audit rows + report), so an overlapping webapp + CLI run can never both
-  apply — the second one gets a clear error.
+- An applied run is one atomic database transaction (positions + audit
+  rows + report), so an overlapping webapp + CLI run can never both apply —
+  the second one waits on the database lock (or times out).
 - Undo math is exact: `avg_price` is recomputed from
   `shares · avg_price − buy_value − commission`, which restores the
-  pre-run value bit-for-bit.
-- On first start, the legacy CSVs (`data/positions.csv`,
-  `data/transactions.csv`, `export/composition.csv`) are imported once —
-  positions as-is, the old audit log and last report as a non-undoable
-  `legacy` run. The files are left untouched; the DB is the source of truth.
+  pre-run value bit-for-bit. Editing a BUY row's price later keeps this
+  consistent (undo reads the corrected values).
+- PostgreSQL: the data layer is EF Core with a plain connection string
+  (`ConnectionStrings__Default` + the Npgsql provider). SQLite is the
+  default and all that ships in Docker today; switching is a provider swap
+  if you ever outgrow it.
 
 ## CLI
 
+From the **repo root** (same working-directory note as the webapp above):
+
 ```bash
-.venv/bin/python imoex_dca.py                  # interactive: prompts for amount
-.venv/bin/python imoex_dca.py --dry-run [N]    # preview, defaults to 10,000 RUB
-.venv/bin/python imoex_dca.py --undo           # reverse the last applied run
+dotnet build
+dotnet src/IndexInvestment.Cli/bin/Debug/net10.0/IndexInvestment.Cli.dll run  --user <email> --amount 10000 [--dry-run]
+dotnet src/IndexInvestment.Cli/bin/Debug/net10.0/IndexInvestment.Cli.dll undo --user <email>
+dotnet src/IndexInvestment.Cli/bin/Debug/net10.0/IndexInvestment.Cli.dll list --user <email>
 ```
+
+Uses the same database as the webapp (default `data/app.db`, `--db` to
+override) and the user's own settings (commission + index). Overlapping
+webapp + CLI writers are serialized by the database.
 
 ## Docker
 
@@ -124,31 +151,32 @@ docker compose up --build
 Then open <http://127.0.0.1:8080> (change the port mapping in
 `docker-compose.yml` if you want a different one).
 
-- `Dockerfile` — Python image with the app, running as a non-root user (uid
+- `Dockerfile` — .NET image with the app, running as a non-root user (uid
   1000) so bind-mounted files are not root-owned on the host. On a Linux
-  host, `chown` `data/` and `export/` to uid 1000 first (on Docker Desktop
-  for macOS it just works). Uvicorn binds to `0.0.0.0` *inside* the
-  container, but the app port is not published.
+  host, `chown data/` to uid 1000 first (on Docker Desktop for macOS it
+  just works). Uvicorn→Kestrel binds to `0.0.0.0` *inside* the container,
+  but the app port is not published.
 - `nginx.conf` — reverse proxy, the only external entry point, with a
   120s proxy timeout.
-- `data/` and `export/` are bind-mounted from the host, so the database,
-  password hash, and legacy CSVs survive image rebuilds and are never baked
-  into the image (see `.dockerignore`).
+- `data/` is bind-mounted from the host, so the database (and everything
+  in it) survives image rebuilds and is never baked into the image (see
+  `.dockerignore`).
 
 ## Caching
 
 Market data (index composition + closes) is settled once per trading day,
-so it is cached in-process for an hour (`SNAPSHOT_TTL` in `dca.py`):
+so it is cached in-process for an hour (`SnapshotTtl` in `MarketDataService`),
+**per index** — two users on different indexes don't evict each other:
 
 - the cache is invalidated on every login, on every *applied* run (which
   fetches fresh data), and via the **↻ Refresh** button;
 - dashboard loads and dry-run previews are served from the cache.
 
 A snapshot is exactly two MOEX requests: the index analytics (weights +
-trade date) and the TQBR board (lot sizes + last legal close per ticker),
-so a cold fetch takes ~1 s instead of the old ~50 sequential price requests.
-Tickers whose last settled session is more than 30 days old (long
-suspensions) make the snapshot fail with a clear error.
+trade date, paginated for large indexes) and the TQBR board (lot sizes +
+last legal close per ticker), so a cold fetch takes ~1 s. Tickers whose
+last settled session is more than 30 days old (long suspensions) make the
+snapshot fail with a clear error.
 
 ## How the allocator works
 
@@ -160,23 +188,20 @@ holdings and index-proportional targets, the allocator:
    error the most,
 3. optionally spends the remaining cash even at a slight error cost.
 
-If fewer than `CARRY_THRESHOLD` tickers fit in the budget, the whole
+If fewer than `CarryThreshold` tickers fit in the budget, the whole
 contribution is carried over to the next period instead of buying.
 Leftover cash is reported per run but not persisted — add it to the next
 contribution manually if you want.
 
-## Configuration
-
-Constants at the top of `dca.py`: commission (`0.045%`), carry threshold,
-index name, snapshot TTL. Storage lives in `db.py`.
-
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest
+dotnet test
 ```
 
 Covers the allocator (floor start, greedy phase, phase-2 remainder, budget
-with commission), the run/undo pipeline end-to-end with a mocked market and
-temp database (apply → undo round-trip restores the exact pre-run state),
-dry-run purity, the legacy CSV migration, and snapshot error handling.
+with commission), the run/undo pipeline end-to-end with a fake market and
+temp databases (apply → undo round-trip restores the exact pre-run state),
+dry-run purity, position/transaction editing and average-price recompute,
+CSV imports (including rollback on inconsistency), snapshot error handling,
+and per-user isolation (two users' data never mix).

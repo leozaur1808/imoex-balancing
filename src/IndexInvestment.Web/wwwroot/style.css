@@ -1,4 +1,4 @@
-/* IMOEX DCA webapp — minimal styling */
+/* Index DCA webapp — minimal styling */
 
 :root {
   --bg: #0f1216;
@@ -31,6 +31,7 @@ h3 { font-size: 14px; margin: 0 0 8px; }
 .pos { color: var(--pos); }
 .neg { color: var(--neg); }
 .error { color: var(--error); font-size: 13px; }
+.ok-msg { color: var(--pos); font-size: 13px; }
 
 /* ---------- header ---------- */
 
@@ -92,7 +93,7 @@ main {
   flex-wrap: wrap;
 }
 
-.run-form label {
+.run-form label, .field label {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -100,7 +101,7 @@ main {
   color: var(--muted);
 }
 
-input[type="number"], input[type="password"] {
+input[type="number"], input[type="password"], input[type="email"], input[type="text"] {
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -110,7 +111,7 @@ input[type="number"], input[type="password"] {
   width: 200px;
 }
 
-input:focus { outline: none; border-color: var(--accent); }
+input:focus, textarea:focus { outline: none; border-color: var(--accent); }
 
 .btn {
   background: var(--panel-2);
@@ -149,6 +150,18 @@ input:focus { outline: none; border-color: var(--accent); }
 }
 .btn-danger:hover:not(:disabled) { background: rgba(224, 93, 93, 0.12); }
 
+.btn-icon {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.btn-icon:hover { color: var(--text); border-color: var(--border); }
+.btn-icon.danger:hover { color: var(--neg); border-color: var(--neg); }
+
 .undo-line {
   display: flex;
   align-items: center;
@@ -156,6 +169,24 @@ input:focus { outline: none; border-color: var(--accent); }
   margin: 14px 0 0;
 }
 .undo-line[hidden] { display: none; }
+
+/* ---------- settings panel ---------- */
+
+.settings-grid {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+details.settings summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 14px;
+  user-select: none;
+}
+details.settings summary:hover { color: var(--text); }
+details.settings[open] summary { margin-bottom: 14px; }
 
 /* ---------- spinner ---------- */
 
@@ -269,6 +300,65 @@ th:nth-child(2), td:nth-child(2) { text-align: left; }
 
 tbody tr:hover { background: var(--panel-2); }
 
+.muted-cell { color: var(--muted); }
+
+/* ---------- management (positions / imports) ---------- */
+
+.mgmt {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.mgmt h3 { margin-bottom: 10px; }
+
+.add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.add-row input { width: 140px; }
+.add-row input.narrow { width: 110px; }
+
+pre.code {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-x: auto;
+  line-height: 1.6;
+}
+
+.import-block { margin-bottom: 22px; }
+.import-block:last-child { margin-bottom: 0; }
+
+.import-block h3 { margin-bottom: 6px; }
+.import-block .hint { margin: 6px 0 10px; }
+
+textarea.csv {
+  width: 100%;
+  min-height: 120px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.import-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
 /* ---------- auth page ---------- */
 
 .auth-body {
@@ -283,7 +373,7 @@ tbody tr:hover { background: var(--panel-2); }
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 32px;
-  width: 340px;
+  width: 360px;
 }
 
 .auth-card h1 { margin-bottom: 4px; }
@@ -293,3 +383,27 @@ tbody tr:hover { background: var(--panel-2); }
 #auth-form input { width: 100%; }
 #auth-form button { margin-top: 6px; }
 #auth-error { margin-top: 12px; }
+
+/* ---------- admin page ---------- */
+
+.admin-actions { display: flex; gap: 6px; }
+
+.role-badge {
+  display: inline-block;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 1px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.locked-badge {
+  display: inline-block;
+  border: 1px solid var(--neg);
+  color: var(--neg);
+  border-radius: 999px;
+  padding: 1px 10px;
+  font-size: 11px;
+}

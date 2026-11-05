@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Index DCA — Admin</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Index DCA — Admin</h1>
+    <div class="header-right">
+      <a class="btn btn-ghost" href="/">← Dashboard</a>
+      <button id="logout-btn" class="btn btn-ghost">Log out</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Create account</h2>
+      <div class="run-form">
+        <label>Email
+          <input type="email" id="new-email" placeholder="user@example.com">
+        </label>
+        <label>Password
+          <input type="password" id="new-password" minlength="4" placeholder="at least 4 chars">
+        </label>
+        <button type="button" id="new-user" class="btn btn-primary">Create</button>
+        <span class="ok-msg" id="new-msg" hidden>Created</span>
+      </div>
+      <p class="error" id="new-err" hidden></p>
+    </section>
+
+    <section class="panel">
+      <h2>Users</h2>
+      <div class="table-wrap">
+        <table id="users-table">
+          <thead>
+            <tr>
+              <th>Email</th><th>Role</th><th>Index</th><th>Comm&nbsp;%</th>
+              <th>Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/admin.js"></script>
+</body>
+</html>

@@ -1,9 +1,13 @@
 .git
+.gitignore
 .venv
-__pycache__/
-*.py[cod]
-.DS_Store
-
-# Personal data — mounted as volumes, never baked into the image
+__pycache__
+*.pyc
 data/
 export/
+**/bin/
+**/obj/
+.vs/
+.vscode/
+.idea/
+tests/

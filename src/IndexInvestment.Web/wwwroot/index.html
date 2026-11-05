@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Index DCA</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Index DCA</h1>
+    <div class="header-right">
+      <span class="muted" id="trade-date"></span>
+      <button id="refresh-btn" class="btn btn-ghost" title="Refetch market data from MOEX">↻ Refresh</button>
+      <button id="settings-btn" class="btn btn-ghost" title="Your settings">⚙ Settings</button>
+      <a id="admin-link" class="btn btn-ghost" href="/admin.html" hidden>Admin</a>
+      <button id="logout-btn" class="btn btn-ghost">Log out</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Summary cards -->
+    <section class="cards" id="cards">
+      <div class="card"><div class="card-label">Portfolio value</div><div class="card-value" id="c-value">…</div></div>
+      <div class="card"><div class="card-label">Cost basis</div><div class="card-value" id="c-cost">…</div></div>
+      <div class="card"><div class="card-label">P/L</div><div class="card-value" id="c-pl">…</div></div>
+      <div class="card"><div class="card-label">Held / index</div><div class="card-value" id="c-held">…</div></div>
+    </section>
+
+    <!-- Settings (per user) -->
+    <section class="panel" id="settings-panel" hidden>
+      <details class="settings" id="settings-details">
+        <summary>Your settings — commission &amp; index</summary>
+        <div class="settings-grid">
+          <label class="field">
+            Commission, % per trade
+            <input type="number" id="set-commission" min="0" step="0.001">
+          </label>
+          <label class="field">
+            MOEX index
+            <input type="text" id="set-index" list="index-list" maxlength="32"
+                   placeholder="IMOEX" pattern="[A-Za-z0-9]+">
+            <datalist id="index-list">
+              <option value="IMOEX"></option>
+              <option value="MOEXBMI"></option>
+              <option value="MOEXC"></option>
+              <option value="MOEXRUS"></option>
+              <option value="MOEXDYN"></option>
+              <option value="MOEXGAP"></option>
+              <option value="MOEXAIR"></option>
+            </datalist>
+          </label>
+          <button type="button" id="settings-save" class="btn">Save</button>
+          <span class="ok-msg" id="settings-msg" hidden>Saved</span>
+        </div>
+        <p class="muted" style="margin:10px 0 0">
+          Any MOEX stock index id works (all indexes here are stock-based).
+          The index and commission apply to your runs only.
+        </p>
+      </details>
+    </section>
+
+    <!-- Run panel -->
+    <section class="panel">
+      <h2>Run DCA</h2>
+      <form id="run-form" class="run-form">
+        <label>
+          Amount to invest (RUB)
+          <input type="number" id="amount" min="1" step="any" value="10000" required>
+        </label>
+        <button type="submit" id="preview-btn" class="btn">Preview (dry run)</button>
+        <button type="button" id="confirm-btn" class="btn btn-primary" hidden>Confirm &amp; apply</button>
+      </form>
+      <p class="undo-line" id="undo-wrap" hidden>
+        <button type="button" id="undo-btn" class="btn btn-danger">↩ Undo last run</button>
+        <span class="muted" id="undo-info"></span>
+      </p>
+      <div id="run-spinner" class="spinner-wrap" hidden><div class="spinner"></div><span class="muted" id="spinner-label">Loading…</span></div>
+      <p class="error" id="run-error" hidden></p>
+
+      <div id="run-result" hidden>
+        <div class="result-head">
+          <h3 id="result-title"></h3>
+          <div class="result-summary" id="result-summary"></div>
+        </div>
+        <div class="table-wrap">
+          <table id="buy-table">
+            <thead>
+              <tr><th>Ticker</th><th>Name</th><th>Idx&nbsp;w%</th><th>Shares</th><th>Price</th><th>Value, RUB</th><th>Comm, RUB</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Data tabs -->
+    <section class="panel">
+      <div class="tabs">
+        <button class="tab active" data-tab="holdings">Holdings</button>
+        <button class="tab" data-tab="transactions">Transactions</button>
+        <button class="tab" data-tab="report">Last report</button>
+        <button class="tab" data-tab="import">Import</button>
+        <span class="tabs-right">
+          <a class="dl" href="/download/positions">positions.csv</a>
+          <a class="dl" href="/download/transactions">transactions.csv</a>
+          <a class="dl" href="/download/composition">composition.csv</a>
+        </span>
+      </div>
+      <div id="tab-holder">
+        <div class="table-wrap">
+          <table id="tab-table">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="muted" id="tab-empty" hidden>No data yet.</p>
+
+        <!-- Positions management (holdings tab only) -->
+        <div class="mgmt" id="mgmt-positions" hidden>
+          <h3>Your positions</h3>
+          <p class="muted">
+            Buy rows in a run are priced at the last <i>legal</i> close (t-1). If you bought at a
+            different price, edit the row in the Transactions tab — the average price is recomputed.
+            You can also add or fix positions directly here.
+          </p>
+          <div class="add-row">
+            <input type="text" id="pos-ticker" placeholder="Ticker" maxlength="32">
+            <input type="number" id="pos-shares" class="narrow" placeholder="Shares" min="1" step="1">
+            <input type="number" id="pos-avg" class="narrow" placeholder="Avg price" min="0" step="any">
+            <button type="button" id="pos-add" class="btn">Add / replace</button>
+            <span class="ok-msg" id="pos-msg" hidden>Done</span>
+          </div>
+          <div class="table-wrap">
+            <table id="pos-table">
+              <thead><tr><th>Ticker</th><th>Shares</th><th>Avg price</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="muted" id="pos-empty" hidden>No positions yet.</p>
+        </div>
+
+        <!-- Import (import tab only) -->
+        <div id="import-holder" hidden>
+          <div class="import-block">
+            <h3>Import current positions</h3>
+            <p class="muted hint">
+              Replaces the position of every listed ticker (safe to re-import a full portfolio).
+              Format — the same as the old <code>positions.csv</code>:
+            </p>
+            <pre class="code">ticker,shares,avg_price
+AFKS,200,7.4037
+AFLT,100,32.9121</pre>
+            <textarea class="csv" id="imp-pos-csv" spellcheck="false"
+              placeholder="paste CSV rows here"></textarea>
+            <div class="import-actions">
+              <button type="button" id="imp-pos-btn" class="btn">Import positions</button>
+              <span class="ok-msg" id="imp-pos-msg" hidden></span>
+              <span class="error" id="imp-pos-err" hidden></span>
+            </div>
+          </div>
+          <div class="import-block">
+            <h3>Import transaction history</h3>
+            <p class="muted hint">
+              Rows are replayed in order (BUY adds, UNDO reverses) and stored as a non-undoable
+              import. <code>value</code> and <code>commission</code> are optional (value defaults to
+              shares·price, commission to 0). Same as the old <code>transactions.csv</code>:
+            </p>
+            <pre class="code">date,ticker,action,shares,price,value,commission
+2026-09-24,AFKS,BUY,200,7.4,1480.0,0.74
+2026-09-24,AFLT,BUY,80,32.76,2620.8,1.3104</pre>
+            <textarea class="csv" id="imp-tx-csv" spellcheck="false"
+              placeholder="paste CSV rows here"></textarea>
+            <div class="import-actions">
+              <button type="button" id="imp-tx-btn" class="btn">Import transactions</button>
+              <span class="ok-msg" id="imp-tx-msg" hidden></span>
+              <span class="error" id="imp-tx-err" hidden></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

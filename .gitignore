@@ -1,29 +1,22 @@
-# Байт-код, оптимизированные файлы
+# .NET
+bin/
+obj/
+*.user
+
+# Local databases and personal data
+data/
+export/
+
+# Legacy Python environment (stays on main, kept locally)
+.venv/
 __pycache__/
 *.py[cod]
-*.pyo
+.pytest_cache/
 
-# Файлы и каталоги, создаваемые при сборке
-build/
-dist/
-*.egg-info
-
-# Виртуальное окружение
-venv/
-.venv/
-
-# Настройки IDE
+# IDE
 .idea/
 .vscode/
+.vs/
 
-export/
-data/
-
-# Системные файлы
+# OS
 .DS_Store
-
-# Файлы переменных окружения (ключи, пароли)
-.env
-
-# Контрольные точки Jupyter Notebook
-.ipynb_checkpoints

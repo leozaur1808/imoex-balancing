@@ -2,11 +2,13 @@ services:
   app:
     build: .
     restart: unless-stopped
-    # Personal data lives in the host's data/ and export/ dirs
-    # (positions, transactions, password hash).
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:8000
+      # SQLite in the bind-mounted data/ dir (users, settings, positions,
+      # runs, transactions) — the app creates the schema on first start.
+      ConnectionStrings__Default: Data Source=/app/data/app.db
     volumes:
       - ./data:/app/data
-      - ./export:/app/export
     # No ports published — nginx is the only entry point.
 
   nginx:

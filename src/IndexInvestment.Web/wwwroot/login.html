@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Index DCA — Login</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="auth-body">
+  <div class="auth-card">
+    <h1>Index DCA</h1>
+    <p class="muted" id="auth-subtitle">Enter your credentials to continue.</p>
+
+    <!-- setup mode: first run, create the admin account -->
+    <div id="setup-fields" hidden>
+      <input type="email" id="email" placeholder="Email" autofocus required>
+      <input type="password" id="password" placeholder="Password" required>
+      <input type="password" id="password2" placeholder="Repeat password" required>
+    </div>
+
+    <!-- login mode -->
+    <div id="login-fields" hidden>
+      <input type="email" id="l-email" placeholder="Email" autofocus required>
+      <input type="password" id="l-password" placeholder="Password" required>
+    </div>
+
+    <button type="button" id="auth-btn">Log in</button>
+    <p class="error" id="auth-error" hidden></p>
+  </div>
+
+  <script>
+    const sub = document.getElementById('auth-subtitle');
+    const btn = document.getElementById('auth-btn');
+    const err = document.getElementById('auth-error');
+
+    let isSetup = false;
+
+    async function init() {
+      try {
+        const r = await fetch('/api/auth-state');
+        const body = await r.json();
+        isSetup = !!body.setup;
+      } catch { isSetup = false; }
+      applyMode();
+    }
+
+    function applyMode() {
+      document.getElementById('setup-fields').hidden = !isSetup;
+      document.getElementById('login-fields').hidden = isSetup;
+      if (isSetup) {
+        sub.textContent = 'First run — create the admin account. Further accounts are created by this admin.';
+        btn.textContent = 'Create admin account';
+      } else {
+        sub.textContent = 'Enter your credentials to continue.';
+        btn.textContent = 'Log in';
+      }
+    }
+
+    async function submit() {
+      err.hidden = true;
+      btn.disabled = true;
+      const email = (isSetup
+        ? document.getElementById('email').value
+        : document.getElementById('l-email').value).trim();
+      const password = (isSetup
+        ? document.getElementById('password').value
+        : document.getElementById('l-password').value);
+      if (!email || !password) {
+        err.textContent = 'Email and password are required';
+        err.hidden = false;
+        btn.disabled = false;
+        return;
+      }
+      if (isSetup) {
+        const password2 = document.getElementById('password2').value;
+        if (password !== password2) {
+          err.textContent = 'Passwords do not match';
+          err.hidden = false;
+          btn.disabled = false;
+          return;
+        }
+      }
+      try {
+        const r = await fetch(isSetup ? '/api/setup' : '/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          // if setup failed because an account exists, switch to login
+          if (isSetup && r.status === 409) {
+            isSetup = false;
+            applyMode();
+            return;
+          }
+          throw new Error(body.detail || `HTTP ${r.status}`);
+        }
+        window.location.href = '/';
+      } catch (ex) {
+        err.textContent = ex.message;
+        err.hidden = false;
+        btn.disabled = false;
+      }
+    }
+
+    btn.addEventListener('click', submit);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && document.activeElement.tagName === 'INPUT') submit();
+    });
+    init();
+  </script>
+</body>
+</html>

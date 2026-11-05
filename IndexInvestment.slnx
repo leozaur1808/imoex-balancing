@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/IndexInvestment.Cli/IndexInvestment.Cli.csproj" />
+    <Project Path="src/IndexInvestment.Core/IndexInvestment.Core.csproj" />
+    <Project Path="src/IndexInvestment.Web/IndexInvestment.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/IndexInvestment.Tests/IndexInvestment.Tests.csproj" />
+  </Folder>
+</Solution>
